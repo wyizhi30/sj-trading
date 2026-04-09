@@ -102,7 +102,6 @@ ui.py               ← 依賴 schemas、broker（只訂閱事件）
 ```python
 import shioaji as sj
 
-# simulation=True 傳入建構子，不是 login()
 api = sj.Shioaji(simulation=True)
 
 api.login(
@@ -118,8 +117,7 @@ api.login(
 Shioaji 使用**純數字代碼**，不帶任何後綴：
 
 ```python
-api.Contracts.Stocks["2330"]     # ✅ 正確
-api.Contracts.Stocks["2330.TW"]  # ❌ 錯誤
+api.Contracts.Stocks["2330"]
 ```
 
 ### 4.3 下單 API
@@ -225,7 +223,7 @@ def on_order(stat, msg):
 
 | 欄位 | 說明 |
 |------|------|
-| `code` | 純數字，例如 `"2330"`（不帶 `.TW`） |
+| `code` | 純數字，例如 `"2330"` |
 | `action` | `"Buy"` 或 `"Sell"`（首字大寫） |
 | `order_type` | `"MARKET"` 或 `"LIMIT"` |
 
@@ -337,12 +335,6 @@ tkinter      # Python 內建
 ---
 
 ## 十一、常見問題
-
-**Q：`simulation=True` 要放哪裡？**  
-A：`sj.Shioaji(simulation=True)`，不是 `login()`。
-
-**Q：股票代碼要不要帶 `.TW`？**  
-A：不要。使用純數字，例如 `"2330"`。
 
 **Q：`action` 大小寫？**  
 A：首字大寫：`"Buy"` / `"Sell"`。

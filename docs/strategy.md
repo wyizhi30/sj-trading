@@ -27,7 +27,7 @@ broker.py      ←┘（只呼叫 place_signal）
 ```python
 class BaseStrategy:
     strategy_id: str          # 策略名稱（唯一識別碼）
-    code: str                 # 交易標的代碼，例如 "2330"（不帶 .TW）
+    code: str                 # 交易標的代碼，例如 "2330"
     broker: BaseBroker        # Broker 參考
     is_running: bool          # 是否正在運行
 
@@ -231,7 +231,7 @@ strategy.start()
 
 ## 注意事項
 
-1. `code` 欄位使用**純數字**，例如 `"2330"`，不帶 `.TW`
+1. `code` 欄位使用**純數字**，例如 `"2330"`
 2. `action` 值使用**首字大寫**：`"Buy"` / `"Sell"`
 3. KBar 欄位名稱**首字大寫**：`Open`、`High`、`Low`、`Close`、`Volume`
 4. `on_kbar` 回傳 Signal 後，由外部（`main.py` 或 `Backtest`）呼叫 `broker.place_signal()`
