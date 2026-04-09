@@ -8,3 +8,21 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local secrets and runtime config
+.env
+.env.*
+!.env.example
+
+# Broker certificates and keys
+cert/
+*.pfx
+*.p12
+*.pem
+*.key
+*.crt
+
+# Runtime logs and local state
+*.log
+*.sqlite
+*.db
