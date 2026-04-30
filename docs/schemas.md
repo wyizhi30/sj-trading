@@ -211,7 +211,7 @@ class KBar:
     Close: float    # 收盤價
     Volume: int     # 成交量
     Amount: int     # 成交金額
-    interval: str   # K 棒週期，例如 "1D"、"1"（分鐘）
+    interval: str   # K 棒週期，例如 "1H"、"4H"、"1D"、"W"、"M"
 ```
 
 **轉換範例：**
@@ -252,6 +252,7 @@ class PerformanceReport:
     profit_factor: float
     equity_curve: list[float]
     trade_history: list[TradeResult]
+    equity_timestamps: list[str]
 ```
 
 ---

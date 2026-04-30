@@ -63,6 +63,24 @@ MACrossStrategy(
 )
 ```
 
+### 參數驗證規則
+
+`MACrossStrategy` 在建立物件時會立即檢查參數，避免無效設定進入回測或實盤流程：
+
+| 參數 | 規則 | 錯誤行為 |
+|------|------|---------|
+| `strategy_id` | 不能為空字串 | 拋出 `ValueError` |
+| `code` | 不能為空字串 | 拋出 `ValueError` |
+| `quantity` | 必須大於 0 | 拋出 `ValueError` |
+| `short_window` | 必須大於 0 | 拋出 `ValueError` |
+| `long_window` | 必須大於 0 | 拋出 `ValueError` |
+| `short_window` / `long_window` | `short_window < long_window` | 拋出 `ValueError` |
+| `order_type` | 只能是 `MARKET` 或 `LIMIT` | 拋出 `ValueError` |
+
+補充：
+- `order_type` 會在初始化時轉成大寫，確保後續邏輯一致。
+- 這些限制與 `strategy.py` 的 `__post_init__` 驗證一致。
+
 ---
 
 ## on_kbar 方法

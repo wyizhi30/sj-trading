@@ -32,6 +32,7 @@ class _OpenPosition:
     qty: int
     avg_price: float
     entry_time: str
+    entry_commission_total: float = 0.0
 
 
 class Backtester:
@@ -42,22 +43,35 @@ class Backtester:
         initial_cash: 初始資金。
     """
 
-    def __init__(self, strategy: Any, initial_cash: float = 1_000_000.0):
+    def __init__(self, strategy: Any, initial_cash: float = 10_000_000.0, commission_rate: float = 0.001425, tax_rate: float = 0.003, slippage_per_unit: float = 0.0):
         self.strategy = strategy
         self.initial_cash = float(initial_cash)
+        self.commission_rate = float(commission_rate)
+        self.tax_rate = float(tax_rate)
+        self.slippage_per_unit = float(slippage_per_unit)
 
         # 若策略未帶 broker，回測時自動建立 MockBroker。
         broker = getattr(self.strategy, "broker", None)
         if broker is None:
-            broker = MockBroker(initial_cash=self.initial_cash)
+            broker = MockBroker(
+                initial_cash=self.initial_cash,
+                commission_rate=self.commission_rate,
+                tax_rate=self.tax_rate,
+                slippage_per_unit=self.slippage_per_unit,
+            )
             setattr(self.strategy, "broker", broker)
         self.broker: MockBroker = broker
+
+        self.commission_rate = float(getattr(self.broker, "commission_rate", self.commission_rate))
+        self.tax_rate = float(getattr(self.broker, "tax_rate", self.tax_rate))
+        self.slippage_per_unit = float(getattr(self.broker, "slippage_per_unit", self.slippage_per_unit))
 
         self._trade_history: List[TradeResult] = []
         self._equity_curve: List[float] = []
         self._equity_timestamps: List[str] = []
 
         self._cash: float = self.initial_cash
+        self._equity: float = self.initial_cash
         self._last_price: float = 0.0
         self._open_pos: Optional[_OpenPosition] = None
 
@@ -93,9 +107,8 @@ class Backtester:
             if signal is not None:
                 self.broker.place_signal(signal)
 
-            # 更新淨值曲線（MVP：cash + position_qty * close）
-            pos_qty = int(self.broker.get_position(kbar.code))
-            equity = float(self._cash) + float(pos_qty) * float(kbar.Close)
+            # 直接使用 broker 回報的 account.equity，避免與實際乘數/持倉估值脫鉤。
+            equity = float(self._equity)
             self._equity_curve.append(equity)
             self._equity_timestamps.append(str(kbar.ts))
 
@@ -135,6 +148,7 @@ class Backtester:
         # schemas.Account.acc_balance
         try:
             self._cash = float(getattr(account, "acc_balance", self._cash) or self._cash)
+            self._equity = float(getattr(account, "equity", self._equity) or self._equity)
         except Exception:
             return
 
@@ -154,13 +168,14 @@ class Backtester:
         fill_time = str(order.updated_at)
 
         if order.action == "Buy":
-            self._open_or_add_position(code=order.code, qty=qty, price=fill_price, ts=fill_time)
+            commission = self._calc_commission(code=order.code, price=fill_price, qty=qty)
+            self._open_or_add_position(code=order.code, qty=qty, price=fill_price, ts=fill_time, commission=commission)
         elif order.action == "Sell":
             self._close_position(code=order.code, qty=qty, price=fill_price, ts=fill_time)
 
-    def _open_or_add_position(self, code: str, qty: int, price: float, ts: str) -> None:
+    def _open_or_add_position(self, code: str, qty: int, price: float, ts: str, commission: float = 0.0) -> None:
         if self._open_pos is None:
-            self._open_pos = _OpenPosition(code=code, qty=qty, avg_price=price, entry_time=ts)
+            self._open_pos = _OpenPosition(code=code, qty=qty, avg_price=price, entry_time=ts, entry_commission_total=float(commission))
             return
 
         if self._open_pos.code != code:
@@ -173,20 +188,31 @@ class Backtester:
         new_avg = (self._open_pos.avg_price * self._open_pos.qty + price * qty) / float(new_qty)
         self._open_pos.qty = new_qty
         self._open_pos.avg_price = float(new_avg)
+        self._open_pos.entry_commission_total += float(commission)
 
     def _close_position(self, code: str, qty: int, price: float, ts: str) -> None:
         if self._open_pos is None or self._open_pos.code != code:
             return
 
-        close_qty = min(int(qty), int(self._open_pos.qty))
+        open_qty = int(self._open_pos.qty)
+        close_qty = min(int(qty), open_qty)
         if close_qty <= 0:
             return
 
         entry_price = float(self._open_pos.avg_price)
-        pnl = (price - entry_price) * float(close_qty)
+        multiplier = self._get_contract_multiplier(code)
+        gross_pnl = (price - entry_price) * float(close_qty) * float(multiplier)
+        entry_commission = 0.0
+        if open_qty > 0:
+            entry_commission = float(self._open_pos.entry_commission_total) * (float(close_qty) / float(open_qty))
+        exit_commission = self._calc_commission(code=code, price=price, qty=close_qty)
+        exit_tax = self._calc_tax(code=code, action="Sell", price=price, qty=close_qty)
+        pnl = gross_pnl - entry_commission - exit_commission - exit_tax
         pnl_pct = 0.0
         if entry_price != 0:
-            pnl_pct = (price - entry_price) / entry_price * 100.0
+            base_value = entry_price * float(close_qty) * float(multiplier)
+            if base_value != 0:
+                pnl_pct = float(pnl) / float(base_value) * 100.0
 
         trade = TradeResult(
             code=code,
@@ -202,8 +228,29 @@ class Backtester:
         self._trade_history.append(trade)
 
         self._open_pos.qty -= close_qty
+        self._open_pos.entry_commission_total = max(0.0, float(self._open_pos.entry_commission_total) - float(entry_commission))
         if self._open_pos.qty <= 0:
             self._open_pos = None
+
+    @staticmethod
+    def _get_contract_multiplier(code: str) -> float:
+        """回測報表用合約乘數，需與 broker 邏輯一致。"""
+        code_str = str(code).strip()
+        if code_str.isdigit():
+            return 1000.0
+        return 1.0
+
+    def _calc_commission(self, *, code: str, price: float, qty: int) -> float:
+        trade_value = float(price) * float(qty) * float(self._get_contract_multiplier(code))
+        return float(trade_value) * float(self.commission_rate)
+
+    def _calc_tax(self, *, code: str, action: str, price: float, qty: int) -> float:
+        if not str(code).strip().isdigit():
+            return 0.0
+        if str(action) != "Sell":
+            return 0.0
+        trade_value = float(price) * float(qty) * float(self._get_contract_multiplier(code))
+        return float(trade_value) * float(self.tax_rate)
 
     # ---------------------------- 指標計算/輸出 ---------------------------
 

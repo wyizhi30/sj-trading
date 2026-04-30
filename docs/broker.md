@@ -27,7 +27,7 @@ schemas.py  ←  broker.py  ←  strategy.py（只呼叫 place_signal）
 | 類別 | 用途 |
 |------|------|
 | `Broker` | 實盤，連接 Shioaji API |
-| `MockBroker` | 回測，本地模擬成交，不連網路 |
+| `MockBroker` | 回測，本地模擬成交，不連網路，包含基本手續費 / 交易稅 / 滑價 |
 
 兩者繼承同一個 `BaseBroker`，對外介面完全相同。
 
@@ -241,6 +241,17 @@ broker.on_connection_lost(callback: Callable[[], None])
 ## MockBroker（回測用）
 
 繼承 `BaseBroker`，所有對外介面與 `Broker` 完全相同，不連接 Shioaji。
+
+### 回測成本模型
+
+- 手續費：買賣皆依成交金額乘上 `commission_rate` 計算，預設 `0.001425`
+- 交易稅：現股賣出時計算，預設 `0.003`
+- 滑價：依 `slippage_per_unit` 調整成交價，預設 `0.0`
+
+### 現金與成交驗證
+
+- 買單若扣除成本後現金不足，該筆訂單會被標記為 `Failed`
+- 成交後會更新持倉平均成本、現金、未實現損益與帳戶 equity
 
 ### 模擬成交規則
 

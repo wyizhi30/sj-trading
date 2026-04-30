@@ -15,8 +15,9 @@
 from __future__ import annotations
 
 import csv
+import re
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
 
@@ -206,6 +207,158 @@ class MarketData:
             raise ValueError("CSV encoding must be UTF-8") from e
 
         return kbars
+
+    def resample_kbars(self, kbars: list[KBar], freq: str = "1D") -> list[KBar]:
+        """將 KBar 重新取樣成較大的時間框架。
+
+        支援的頻率：
+        - "1H", "2H", "4H"... : 小時級別（數字 + H）
+        - "1D"                  : 日級別（預設）
+        - "W"                   : 週級別（每週一開始）
+        - "M"                   : 月級別
+
+        Args:
+            kbars: KBar 列表。
+            freq: 頻率字符串，例如 "1D", "4H", "W", "M"。
+
+        Returns:
+            重新取樣後的 KBar 列表。
+
+        Raises:
+            ValueError: 頻率格式不正確或不支援時拋出。
+            NotImplementedError: 某些頻率尚未實作時拋出。
+        """
+
+        freq = str(freq).strip().upper()
+        if not kbars:
+            return []
+
+        # 解析頻率
+        num_periods, unit = self._parse_frequency(freq)
+
+        # 排序
+        ordered = sorted(kbars, key=lambda b: self._parse_dt(b.ts))
+
+        # 分組（使用 bucket_end_dt 作為 key 以簡化聚合）
+        grouped: Dict[datetime, list[KBar]] = {}
+        for bar in ordered:
+            bucket_end_dt = self._get_bucket_end_dt(bar.ts, unit, num_periods)
+            grouped.setdefault(bucket_end_dt, []).append(bar)
+
+        # 聚合
+        out: list[KBar] = []
+        for bucket_end_dt in sorted(grouped.keys()):
+            group = grouped[bucket_end_dt]
+            first_bar = group[0]
+
+            out.append(
+                KBar(
+                    code=first_bar.code,
+                    ts=bucket_end_dt.isoformat(),
+                    Open=float(first_bar.Open),
+                    High=max(float(bar.High) for bar in group),
+                    Low=min(float(bar.Low) for bar in group),
+                    Close=float(group[-1].Close),
+                    Volume=sum(int(bar.Volume) for bar in group),
+                    Amount=sum(int(bar.Amount) for bar in group),
+                    interval=freq,
+                )
+            )
+
+        return out
+
+    def _parse_frequency(self, freq: str) -> Tuple[int, str]:
+        """解析頻率字串，回傳 (數字, 單位)。
+
+        支援格式：
+        - "1H", "2H", "4H" 等 -> (1, "H"), (2, "H"), (4, "H")
+        - "1D" -> (1, "D")
+        - "W" -> (1, "W")
+        - "M" -> (1, "M")
+
+        Args:
+            freq: 頻率字符串。
+
+        Returns:
+            (num_periods, unit)，例如 ("4", "H")。
+
+        Raises:
+            ValueError: 格式不正確時拋出。
+        """
+
+        freq = str(freq).strip().upper()
+
+        # 嘗試匹配 "1H", "4H" 等格式
+        match = re.match(r"^(\d+)([HDWM])$", freq)
+        if match:
+            num = int(match.group(1))
+            unit = match.group(2)
+            if num <= 0:
+                raise ValueError(f"frequency number must be > 0, got {num}")
+            if unit not in ("H", "D", "W", "M"):
+                raise ValueError(f"unsupported unit {unit!r}, must be H/D/W/M")
+            return num, unit
+
+        # 嘗試匹配 "W", "M" 等單純單位
+        if freq in ("W", "M"):
+            return 1, freq
+        if freq == "D":
+            return 1, "D"
+
+        raise ValueError(
+            f"invalid frequency {freq!r}; "
+            "supported formats: '1H', '4H', '1D', 'W', 'M', etc."
+        )
+
+    def _get_bucket_end_dt(self, ts: str, unit: str, num_periods: int) -> datetime:
+        """根據時間戳和時間單位，計算時間桶的結束時間（UTC）。
+
+        Args:
+            ts: ISO 8601 時間戳。
+            unit: "H", "D", "W", "M"。
+            num_periods: 時間單位倍數（如 4 表示 4H）。
+
+        Returns:
+            時間桶的結束時間（datetime，UTC）。
+        """
+
+        dt = self._parse_dt(ts)
+
+        if unit == "H":
+            # 小時級別：計算所在桶的結束時間
+            # 例如 4H：0-3時 -> 3:59:59, 4-7時 -> 7:59:59, ...
+            bucket_idx = dt.hour // num_periods
+            bucket_end_hour = (bucket_idx + 1) * num_periods - 1
+            # 若超過 23，則進位到隔天
+            if bucket_end_hour > 23:
+                bucket_end_dt = dt.replace(hour=23, minute=59, second=59) + timedelta(days=1)
+                bucket_end_dt = bucket_end_dt.replace(hour=bucket_end_hour - 24)
+            else:
+                bucket_end_dt = dt.replace(hour=bucket_end_hour, minute=59, second=59)
+            return bucket_end_dt.replace(microsecond=0)
+
+        elif unit == "D":
+            # 日級別：該天的 23:59:59
+            return dt.replace(hour=23, minute=59, second=59, microsecond=0)
+
+        elif unit == "W":
+            # 週級別：該週的週日 23:59:59（ISO week）
+            iso_year, iso_week, iso_day = dt.isocalendar()
+            # 週一是 1，週日是 7
+            week_start = datetime.fromisocalendar(iso_year, iso_week, 1)  # 週一
+            week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59)
+            return week_end.replace(tzinfo=timezone.utc, microsecond=0)
+
+        elif unit == "M":
+            # 月級別：該月的最後一天 23:59:59
+            if dt.month == 12:
+                month_end = datetime(dt.year + 1, 1, 1, tzinfo=timezone.utc) - timedelta(seconds=1)
+            else:
+                month_end = datetime(dt.year, dt.month + 1, 1, tzinfo=timezone.utc) - timedelta(seconds=1)
+            return month_end.replace(hour=23, minute=59, second=59, microsecond=0)
+
+        else:
+            raise ValueError(f"unsupported unit {unit!r}")
 
     def replay(self, kbars: list[KBar], callback: Callable[[KBar], None], speed: float = 0) -> None:
         """依時間順序回放 K 棒。

@@ -523,17 +523,23 @@ class MockBroker(BaseBroker):
     不連接 Shioaji，僅依規格用 KBar 模擬成交。
     """
 
-    def __init__(self, initial_cash: float = 1_000_000.0) -> None:
+    def __init__(self, initial_cash: float = 10_000_000.0, commission_rate: float = 0.001425, tax_rate: float = 0.003, slippage_per_unit: float = 0.0) -> None:
         self._order_callbacks: List[OrderCallback] = []
         self._position_callbacks: List[PositionCallback] = []
         self._account_callbacks: List[AccountCallback] = []
         self._connection_lost_callbacks: List[ConnectionLostCallback] = []
 
+        self._initial_cash: float = float(initial_cash)
+        self.commission_rate: float = float(commission_rate)
+        self.tax_rate: float = float(tax_rate)
+        self.slippage_per_unit: float = float(slippage_per_unit)
         self._orders: Dict[str, Order] = {}
         self._pending_ids: List[str] = []
         self._seq: int = 0
 
         self._positions: Dict[str, int] = {}
+        self._avg_price_by_code: Dict[str, float] = {}
+        self._last_price_by_code: Dict[str, float] = {}
         self._cash: float = float(initial_cash)
 
         now = self._now_iso()
@@ -563,11 +569,16 @@ class MockBroker(BaseBroker):
     # ------------------------------ 主要功能 ------------------------------
 
     def place_signal(self, signal: Signal) -> Order:
-        """建立委託單並加入 pending（MVP）。"""
+        """建立委託單並加入 pending（MVP）。
+
+        使用 signal 的 timestamp 作為訂單建立時間，而非系統當前時間，
+        以確保回測模式下訂單時間與 KBar 時間一致。
+        """
 
         self._seq += 1
         order_id = f"mock-{self._seq:08d}"
-        now = self._now_iso()
+        # 使用 signal 的 timestamp 而不是系統時間（回測模式下應使用 KBar 時間）
+        ts = str(signal.timestamp or "").strip() if signal.timestamp else self._now_iso()
         order = Order(
             order_id=order_id,
             seqno=str(self._seq),
@@ -580,8 +591,8 @@ class MockBroker(BaseBroker):
             status="Submitted",
             filled_price=None,
             filled_quantity=0,
-            created_at=now,
-            updated_at=now,
+            created_at=ts,
+            updated_at=ts,
             error_message=None,
         )
         self._orders[order_id] = order
@@ -619,7 +630,10 @@ class MockBroker(BaseBroker):
         - LIMIT 賣單：High >= 委託價 → 成交價=委託價
         """
 
+        self._last_price_by_code[str(kbar.code)] = float(kbar.Close)
+
         # 只處理對應標的的 pending
+        emitted_position_codes: set[str] = set()
         pending = list(self._pending_ids)
         for order_id in pending:
             order = self._orders.get(order_id)
@@ -632,12 +646,14 @@ class MockBroker(BaseBroker):
             if fill_price is None:
                 continue
 
+            exec_price = self._apply_slippage(float(fill_price), order.action)
+
             filled_qty = int(order.quantity)
             now = str(kbar.ts)
             new_order = replace(
                 order,
                 status="Filled",
-                filled_price=float(fill_price),
+                filled_price=float(exec_price),
                 filled_quantity=filled_qty,
                 updated_at=now,
             )
@@ -645,29 +661,45 @@ class MockBroker(BaseBroker):
             if order_id in self._pending_ids:
                 self._pending_ids.remove(order_id)
 
-            # 更新持倉（MVP：僅做淨持倉）
-            pos = int(self._positions.get(order.code, 0))
-            if order.action == "Buy":
-                pos += filled_qty
-                self._cash -= float(fill_price) * float(filled_qty)
-            else:
-                pos -= filled_qty
-                self._cash += float(fill_price) * float(filled_qty)
+            # 更新持倉與平均成本（MVP：以淨持倉 + 平均成本追蹤未實現損益）
+            try:
+                pos, avg_price = self._apply_fill(
+                    code=order.code,
+                    action=order.action,
+                    quantity=filled_qty,
+                    fill_price=float(exec_price),
+                )
+            except ValueError as e:
+                # 現金不足等例外：標記訂單失敗並記錄錯誤訊息
+                failed_order = replace(
+                    new_order,
+                    status="Failed",
+                    filled_price=None,
+                    filled_quantity=0,
+                    error_message=str(e),
+                )
+                self._orders[order_id] = failed_order
+                self._emit_order(failed_order)
+                continue
+            
             self._positions[order.code] = pos
+            if avg_price is None:
+                self._avg_price_by_code.pop(order.code, None)
+            else:
+                self._avg_price_by_code[order.code] = float(avg_price)
 
             self._emit_order(new_order)
-            self._emit_position(
-                Position(
-                    code=order.code,
-                    direction="Buy" if pos >= 0 else "Sell",
-                    quantity=abs(int(pos)),
-                    price=float(fill_price),
-                    last_price=float(kbar.Close),
-                    pnl=0.0,
-                    yd_quantity=0,
-                )
-            )
-            self._update_account(ts=now)
+            last_price = float(kbar.Close)
+            self._emit_position_snapshot(code=order.code, last_price=last_price)
+            emitted_position_codes.add(str(order.code).strip())
+
+        # 即使沒有成交，也要回報該標的的最新持倉損益，避免持倉明細落後於帳戶區塊。
+        code_key = str(kbar.code).strip()
+        if code_key and code_key in self._positions and code_key not in emitted_position_codes:
+            self._emit_position_snapshot(code=code_key, last_price=float(kbar.Close))
+
+        # 即使沒有成交，也要根據最新收盤價重算帳戶淨值與未實現損益。
+        self._update_account(ts=str(kbar.ts))
 
     # ------------------------------ 內部工具 ------------------------------
 
@@ -683,14 +715,143 @@ class MockBroker(BaseBroker):
             return px if float(kbar.Low) <= px else None
         return px if float(kbar.High) >= px else None
 
+    def _apply_slippage(self, fill_price: float, action: str) -> float:
+        slip = float(self.slippage_per_unit)
+        if slip <= 0:
+            return float(fill_price)
+        if str(action) == "Buy":
+            return max(0.0, float(fill_price) + slip)
+        return max(0.0, float(fill_price) - slip)
+
+    def _trade_costs(self, code: str, action: str, trade_value: float) -> tuple[float, float, float]:
+        commission = float(trade_value) * float(self.commission_rate)
+        tax = 0.0
+        if str(code).strip().isdigit() and str(action) == "Sell":
+            tax = float(trade_value) * float(self.tax_rate)
+        return float(commission), float(tax), float(commission + tax)
+
+    def _get_contract_multiplier(self, code: str) -> float:
+        """根據標的代碼取得合約乘數。
+
+        - 股票（純數字代碼）：1 張 = 1000 股，損益須乘 1000
+        - 期貨（含字母）：暫不定義，先回傳 1（留待未來擴充）
+        
+        Note: 此方法在計算現金與損益時使用，以確保金額單位正確。
+        """
+        code_str = str(code).strip()
+        if code_str.isdigit():
+            return 1000.0  # 股票：1 張 = 1000 股
+        # 期貨、選擇權等：暫時回傳 1（未來可加入 TXF/MXF 等的明確定義）
+        return 1.0
+
     def _update_account(self, ts: str) -> None:
+        unrealized_pnl, total_equity, realized_pnl = self._mark_to_market()
         self._account = replace(
             self._account,
             acc_balance=float(self._cash),
-            equity=float(self._cash),
+            unrealized_pnl=float(unrealized_pnl),
+            realized_pnl=float(realized_pnl),
+            total_pnl=float(total_equity - self._initial_cash),
+            equity=float(total_equity),
             updated_at=str(ts),
         )
         self._emit_account(self._account)
+
+    def _mark_to_market(self) -> tuple[float, float, float]:
+        unrealized_pnl = 0.0
+        market_value = 0.0
+
+        for code, qty in self._positions.items():
+            if qty == 0:
+                continue
+            qty_signed = int(qty)
+            avg_price = float(self._avg_price_by_code.get(code, 0.0) or 0.0)
+            last_price = float(self._last_price_by_code.get(code, avg_price) or avg_price)
+            multiplier = self._get_contract_multiplier(code)
+            unrealized_pnl += float(qty_signed) * (float(last_price) - float(avg_price)) * float(multiplier)
+            market_value += float(qty_signed) * float(last_price) * float(multiplier)
+
+        total_equity = float(self._cash) + float(market_value)
+        total_pnl = float(total_equity) - float(self._initial_cash)
+        realized_pnl = float(total_pnl - unrealized_pnl)
+        return float(unrealized_pnl), float(total_equity), float(realized_pnl)
+
+    def _position_unrealized_pnl(self, code: str, last_price: float) -> float:
+        qty = int(self._positions.get(str(code).strip(), 0))
+        if qty == 0:
+            return 0.0
+        avg_price = float(self._avg_price_by_code.get(str(code).strip(), 0.0) or 0.0)
+        multiplier = self._get_contract_multiplier(code)
+        return float(qty) * (float(last_price) - float(avg_price)) * float(multiplier)
+
+    def _emit_position_snapshot(self, *, code: str, last_price: float) -> None:
+        code_key = str(code).strip()
+        qty = int(self._positions.get(code_key, 0))
+        avg_price = float(self._avg_price_by_code.get(code_key, last_price) or last_price)
+        unrealized_pnl = self._position_unrealized_pnl(code_key, float(last_price))
+        self._emit_position(
+            Position(
+                code=code_key,
+                direction="Buy" if qty >= 0 else "Sell",
+                quantity=abs(int(qty)),
+                price=float(avg_price),
+                last_price=float(last_price),
+                pnl=float(unrealized_pnl),
+                yd_quantity=0,
+            )
+        )
+
+    def _apply_fill(self, *, code: str, action: str, quantity: int, fill_price: float) -> tuple[int, Optional[float]]:
+        current_qty = int(self._positions.get(code, 0))
+        signed_fill = int(quantity) if action == "Buy" else -int(quantity)
+
+        # 現金按成交金額變動，維持與實際成交方向一致。
+        multiplier = self._get_contract_multiplier(code)
+        trade_value = float(fill_price) * float(abs(signed_fill)) * float(multiplier)
+        commission, tax, fees = self._trade_costs(code, action, trade_value)
+        if signed_fill > 0:
+            cost = trade_value + fees
+            if self._cash < cost:
+                raise ValueError(
+                    f"Insufficient cash: need {cost:,.0f} TWD, "
+                    f"but have {self._cash:,.0f} TWD (code={code}, qty={abs(signed_fill)})"
+                )
+            self._cash -= cost
+        else:
+            self._cash += trade_value - fees
+
+        if current_qty == 0:
+            new_qty = signed_fill
+            return new_qty, (float(fill_price) if new_qty != 0 else None)
+
+        current_sign = 1 if current_qty > 0 else -1
+        fill_sign = 1 if signed_fill > 0 else -1
+
+        # 同方向加碼：更新加權平均成本
+        if current_sign == fill_sign:
+            new_qty = current_qty + signed_fill
+            current_avg = float(self._avg_price_by_code.get(code, fill_price) or fill_price)
+            new_avg = (
+                abs(current_qty) * current_avg + abs(signed_fill) * float(fill_price)
+            ) / float(abs(new_qty))
+            return new_qty, float(new_avg)
+
+        # 反方向減碼/反手：先消掉原部位，再視剩餘量決定是否翻倉
+        abs_current = abs(current_qty)
+        abs_fill = abs(signed_fill)
+
+        if abs_fill < abs_current:
+            # 部分平倉，平均成本維持不變
+            new_qty = current_qty + signed_fill
+            return new_qty, float(self._avg_price_by_code.get(code, fill_price) or fill_price)
+
+        if abs_fill == abs_current:
+            # 完全平倉
+            return 0, None
+
+        # 反手：剩餘量以成交價作為新部位平均成本
+        new_qty = current_qty + signed_fill
+        return new_qty, float(fill_price)
 
     def _emit_order(self, order: Order) -> None:
         for cb in list(self._order_callbacks):

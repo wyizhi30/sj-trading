@@ -90,18 +90,7 @@ api.quote.subscribe(
 
 ---
 
-### `subscribe_kbar(code, callback)`
-
-訂閱現股即時 K 棒，每根 K 棒收盤觸發 callback。
-
-**Shioaji 底層實作：**
-```python
-api.quote.subscribe(
-    api.Contracts.Stocks[code],
-    quote_type=sj.constant.QuoteType.BidAsk,  # 需視實際 API 支援決定
-    version=sj.constant.QuoteVersion.v1
-)
-```
+> 目前 `MarketData` 沒有提供獨立的 `subscribe_kbar()` 包裝；實盤以 `subscribe_tick()` 為主，K 棒可由 Tick 自行組成，或使用歷史資料搭配 `replay()` / `resample_kbars()`。
 
 ---
 
@@ -160,6 +149,8 @@ ts,Open,High,Low,Close,Volume,Amount
 
 命名規則建議：`data/{代碼}_1d.csv`，例如 `data/2330_1d.csv`
 
+如果 CSV 沒有 `interval` 欄位，系統會預設為 `1D`。
+
 **回傳：** `list[KBar]`
 
 ---
@@ -174,6 +165,37 @@ ts,Open,High,Low,Close,Volume,Amount
 | `callback` | 每根 K 棒推送時呼叫 |
 | `speed` | `0` = 最快速度（回測用）；`1.0` = 原始速度 |
 
+---
+
+### `resample_kbars(kbars, freq="1D")`
+
+將 K 棒重新取樣成較大的時間框架。支援多種時間單位。
+
+| 參數 | 型別 | 說明 |
+|------|------|------|
+| `kbars` | `list[KBar]` | 原始 K 棒列表 |
+| `freq` | `str` | 目標頻率，預設 `"1D"`（日級別） |
+
+**支援的頻率：**
+
+| 頻率 | 說明 |
+|------|------|
+| `"1H"`, `"2H"`, `"4H"`, ... | 小時級別（數字 + H） |
+| `"1D"` | 日級別（預設） |
+| `"W"` | 週級別 |
+| `"M"` | 月級別 |
+
+**聚合規則：**
+- **Open**：該時間桶的第一根 K 棒的開盤價
+- **Close**：該時間桶的最後一根 K 棒的收盤價
+- **High**：該時間桶內所有 K 棒的最高價的最高值
+- **Low**：該時間桶內所有 K 棒的最低價的最低值
+- **Volume**：該時間桶內所有 K 棒的成交量加總
+- **Amount**：該時間桶內所有 K 棒的成交金額加總
+
+**輸出規則：**
+- `KBar.interval` 會設為目標頻率字串，例如 `1H`、`4H`、`1D`、`W`、`M`
+- 輸出時間戳會落在時間桶的結束時間，並以 UTC ISO 8601 字串表示
 ---
 
 ## API 速率限制（官方規定）

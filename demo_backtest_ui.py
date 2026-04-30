@@ -15,6 +15,9 @@
 
     python demo_backtest_ui.py --code 2330 --start 2026-01-01 --end 2026-03-31 --out-csv data/2330_20260101_20260331.csv
 
+下載模式預設會把下載到的分鐘 K 自動 resample 成 1D 日線後再回測。
+若未來要擴展其他時間框架，可再用 `--resample` 指定。
+
 注意：
 - tkinter 視窗必須在主執行緒執行，因此回測會放在背景執行緒跑。
 - 本專案採 src-layout；直接跑此腳本時會自動把 ./src 加入 sys.path。
@@ -43,8 +46,12 @@ def _require_env(name: str) -> str:
     return v
 
 
-def _download_to_csv(*, code: str, start: str, end: str, out_csv: Path) -> Path:
-    """使用 MarketData.get_history_kbar 下載資料並轉存為 CSV（符合 MarketData.load_csv 格式）。"""
+def _download_to_csv(*, code: str, start: str, end: str, out_csv: Path, resample: Optional[str] = None) -> Path:
+    """使用 MarketData.get_history_kbar 下載資料並轉存為 CSV（符合 MarketData.load_csv 格式）。
+
+    若指定 resample，會先把原始分鐘 K 聚合成目標時間框架後再寫出。
+    目前先支援 `1D`；未來若要加 `1H` / `4H` / `W`，可在 MarketData.resample_kbars 擴充。
+    """
 
     try:
         from dotenv import load_dotenv
@@ -71,6 +78,11 @@ def _download_to_csv(*, code: str, start: str, end: str, out_csv: Path) -> Path:
         kbars = md.get_history_kbar(code=code, start=start, end=end)
         if not kbars:
             raise RuntimeError("下載到的 KBar 為空（可能是日期區間無資料或流量受限）")
+
+        if resample:
+            kbars = md.resample_kbars(kbars, freq=resample)
+            if not kbars:
+                raise RuntimeError(f"resample 後沒有任何 KBar（freq={resample}）")
 
         print(f"找到代號 {code} 的 KBar 數據")
         out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -113,7 +125,8 @@ def main() -> int:
     parser.add_argument("--start", default=None, help="下載歷史資料起日（YYYY-MM-DD）；提供此參數時會走下載→轉存 CSV")
     parser.add_argument("--end", default=None, help="下載歷史資料迄日（YYYY-MM-DD）；提供此參數時會走下載→轉存 CSV")
     parser.add_argument("--out-csv", default=None, help="下載後轉存 CSV 的輸出路徑（預設：data/<code>_<start>_<end>.csv）")
-    parser.add_argument("--initial-cash", type=float, default=1_000_000.0, help="初始資金")
+    parser.add_argument("--resample", default=None, help="下載後重採樣頻率，目前只支援 1D；下載模式未指定時預設使用 1D")
+    parser.add_argument("--initial-cash", type=float, default=10_000_000.0, help="初始資金")
     parser.add_argument("--short", type=int, default=5, help="短均線期數")
     parser.add_argument("--long", type=int, default=20, help="長均線期數")
     parser.add_argument("--quantity", type=int, default=1, help="每次下單張數")
@@ -135,7 +148,8 @@ def main() -> int:
             safe_end = end.replace("-", "")
             csv_path = Path("data") / f"{code}_{safe_start}_{safe_end}.csv"
         try:
-            csv_path = _download_to_csv(code=code, start=start, end=end, out_csv=csv_path)
+            resample = str(args.resample).strip().upper() if args.resample else "1D"
+            csv_path = _download_to_csv(code=code, start=start, end=end, out_csv=csv_path, resample=resample)
             print(f"已下載並轉存 CSV：{csv_path}")
         except Exception as e:
             print(f"下載/轉存失敗：{e}")

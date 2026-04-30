@@ -126,13 +126,35 @@ class MACrossStrategy(BaseStrategy):
   risk_guard: RiskGuard = field(default_factory=RiskGuard)
 
   _closes: list[float] = field(default_factory=list, init=False, repr=False)
-  _position_qty: int = field(default=0, init=False, repr=False)
+
+  def __post_init__(self) -> None:
+    """初始化參數驗證。
+
+    讓無效參數在建立物件時立即失敗，避免回測/實盤中才出現難以追蹤的錯誤。
+    """
+
+    if not str(self.strategy_id).strip():
+      raise ValueError("strategy_id 不可為空")
+    if not str(self.code).strip():
+      raise ValueError("code 不可為空")
+    if int(self.quantity) <= 0:
+      raise ValueError("quantity 必須大於 0")
+    if int(self.short_window) <= 0:
+      raise ValueError("short_window 必須大於 0")
+    if int(self.long_window) <= 0:
+      raise ValueError("long_window 必須大於 0")
+    if int(self.short_window) >= int(self.long_window):
+      raise ValueError("short_window 必須小於 long_window")
+
+    order_type = str(self.order_type).strip().upper()
+    if order_type not in ("MARKET", "LIMIT"):
+      raise ValueError("order_type 必須是 MARKET 或 LIMIT")
+    self.order_type = order_type
 
   def get_current_position(self) -> int:
     """取得目前持倉張數。
 
-    - 若 broker 提供 `get_position()`，優先使用 broker 資訊。
-    - 否則回傳策略內部追蹤值（由 `on_order_update()` 更新）。
+    完全依賴 broker 的 get_position()。若 broker 不可用，回傳 0。
     """
 
     if self.broker is not None:
@@ -140,32 +162,15 @@ class MACrossStrategy(BaseStrategy):
         return int(self.broker.get_position(self.code))
       except Exception:
         pass
-    return int(self._position_qty)
+    return 0
 
   def on_order_update(self, order: Order) -> None:
-    """接收訂單更新並更新策略內部持倉（MVP）。
+    """接收訂單更新（MVP：目前不做內部追蹤，完全依賴 broker）。
 
-    只處理已成交（Filled）的訂單：
-    - Buy：持倉 += quantity
-    - Sell：持倉 -= quantity（不做額外下限保護，由上游確保正確）
+    此方法保留為可選的外部擴展點。若策略需監控訂單事件，可在子類覆蓋。
     """
 
-    if getattr(order, "code", None) != self.code:
-      return
-
-    status = str(getattr(order, "status", "")).strip().lower()
-    if status != "filled":
-      return
-
-    action = str(getattr(order, "action", "")).strip().lower()
-    qty = int(getattr(order, "quantity", 0) or 0)
-    if qty <= 0:
-      return
-
-    if action == "buy":
-      self._position_qty += qty
-    elif action == "sell":
-      self._position_qty -= qty
+    return
 
   def on_kbar(self, kbar: KBar) -> Optional[Signal]:
     """接收 KBar，判斷是否產生 Buy/Sell 訊號。

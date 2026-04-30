@@ -5,7 +5,7 @@
 `backtest.py` 負責用歷史資料測試策略表現：
 
 - 載入歷史 K 棒（CSV 或 `api.kbars()`），逐根推送給 Strategy
-- 使用 `MockBroker` 模擬成交（不連網路）
+- 使用 `MockBroker` 模擬成交（不連網路，已包含基本手續費 / 交易稅 / 滑價）
 - 計算績效指標：總報酬率、勝率、最大回撤、Sharpe Ratio
 
 ---
@@ -16,10 +16,10 @@
 1. 建立 MockBroker（設定初始資金）
 2. 建立 Strategy（傳入 MockBroker）
 3. 載入歷史 KBar 列表
-4. 逐根 KBar 推送 Strategy.on_kbar()
-5. 有 Signal → broker.place_signal()
-6. MockBroker.process_kbar() 判斷成交
-7. 成交 → 記錄 TradeResult、更新每日淨值
+4. 先用 MockBroker.process_kbar() 消化上一根 K 棒帶來的掛單成交
+5. 再推送 Strategy.on_kbar()
+6. 若有 Signal → broker.place_signal()
+7. 由 broker 回報更新 TradeResult、持倉與 account equity
 8. 計算並輸出 PerformanceReport
 ```
 
@@ -32,7 +32,10 @@
 ```python
 Backtester(
     strategy: BaseStrategy,
-    initial_cash: float = 1_000_000
+    initial_cash: float = 10_000_000,
+    commission_rate: float = 0.001425,
+    tax_rate: float = 0.003,
+    slippage_per_unit: float = 0.0,
 )
 ```
 
@@ -104,7 +107,7 @@ strategy = MACrossStrategy(
     quantity=1
 )
 
-backtester = Backtester(strategy=strategy, initial_cash=1_000_000)
+backtester = Backtester(strategy=strategy, initial_cash=10_000_000)
 
 # 從 CSV 執行
 report = backtester.run_from_csv("data/2330_1d.csv", code="2330")
@@ -131,7 +134,7 @@ df.ts = pd.to_datetime(df.ts)
 kbars = [
     KBar(code="2330", ts=str(row.ts), Open=row.Open, High=row.High,
          Low=row.Low, Close=row.Close, Volume=row.Volume,
-         Amount=row.Amount, interval="1d")
+         Amount=row.Amount, interval="1D")
     for row in df.itertuples()
 ]
 
@@ -170,10 +173,11 @@ print(f"最佳：短均線 {best['short']}，長均線 {best['long']}")
 
 ## 回測限制
 
-1. **未計算交易成本**（可擴充）
-   - 手續費：買賣各 0.1425%（可打折）
-   - 交易稅：賣出 0.3%
-2. **未模擬滑價**
+1. **已加入基本交易成本**
+    - 手續費：買賣皆依成交金額 × 費率計算（預設 0.1425%）
+    - 交易稅：股票賣出時計算（預設 0.3%）
+2. **已加入固定滑價模型**
+    - Market 單會依買/賣方向調整成交價
 3. **回測過擬合風險**：同一資料調參容易過擬合，建議預留樣本外測試區間
 4. `api.kbars()` 盤中查詢每日上限 **270 次**，大量下載請注意
 

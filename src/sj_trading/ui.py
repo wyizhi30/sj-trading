@@ -188,6 +188,17 @@ class TradingUI:
         pane.add(left, weight=2)
         pane.add(right, weight=2)
 
+        # 控制列（Only Filled 過濾）
+        self._only_filled_var = tk.BooleanVar(value=False)
+        controls_frame = ttk.Frame(left)
+        controls_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Checkbutton(
+            controls_frame,
+            text="Only Filled",
+            variable=self._only_filled_var,
+            command=self._render_order_table,
+        ).pack(side=tk.LEFT)
+
         # 訂單表
         self._order_tree = ttk.Treeview(
             left,
@@ -215,9 +226,10 @@ class TradingUI:
 
         order_scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self._order_tree.yview)
         self._order_tree.configure(yscrollcommand=order_scroll.set)
-        self._order_tree.grid(row=0, column=0, sticky="nsew")
-        order_scroll.grid(row=0, column=1, sticky="ns")
-        left.grid_rowconfigure(0, weight=1)
+        # 因加入 control 列，將表格放在 row=1
+        self._order_tree.grid(row=1, column=0, sticky="nsew")
+        order_scroll.grid(row=1, column=1, sticky="ns")
+        left.grid_rowconfigure(1, weight=1)
         left.grid_columnconfigure(0, weight=1)
 
         # 狀態顏色 tag（Treeview tag 以 foreground 為主）
@@ -361,7 +373,11 @@ class TradingUI:
         self._render_order_table()
 
     def _render_order_table(self) -> None:
-        items = list(self._order_data_by_id.items())
+        # 當啟用 Only Filled 時，僅顯示狀態為 Filled 的訂單
+        if getattr(self, "_only_filled_var", None) and self._only_filled_var.get():
+            items = [(oid, o) for oid, o in self._order_data_by_id.items() if str(o.status) == "Filled"]
+        else:
+            items = list(self._order_data_by_id.items())
         items.sort(key=lambda kv: self._order_sort_key(kv[1]), reverse=True)
 
         for idx, (order_id, order) in enumerate(items):
