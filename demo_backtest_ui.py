@@ -116,7 +116,7 @@ def main() -> int:
 
     from sj_trading.backtest import Backtester
     from sj_trading.broker import MockBroker
-    from sj_trading.strategy import MACrossStrategy
+    from sj_trading.strategys import MACrossStrategy
     from sj_trading.ui import TradingUI
 
     parser = argparse.ArgumentParser(description="sj-trading DEMO（回測 + UI）")
@@ -162,11 +162,9 @@ def main() -> int:
         print(f"CSV 不存在：{csv_path}")
         return 2
 
-    broker = MockBroker(initial_cash=float(args.initial_cash))
     strategy = MACrossStrategy(
         strategy_id="ma_cross_v1",
         code=code,
-        broker=broker,
         short_window=int(args.short),
         long_window=int(args.long),
         quantity=int(args.quantity),
@@ -174,7 +172,7 @@ def main() -> int:
     )
     backtester = Backtester(strategy=strategy, initial_cash=float(args.initial_cash))
 
-    ui = TradingUI(broker=broker, mode="backtest")
+    ui = TradingUI(broker=backtester.broker, mode="backtest")
 
     def _run_backtest() -> None:
         try:

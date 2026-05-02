@@ -10,7 +10,7 @@ KBar（CSV / API）
   → 產出 TradeResult 與 PerformanceReport
 
 注意：
-- 本模組不做策略優化、不加入交易成本與滑價（MVP）。
+- 本模組不做策略優化。
 - 指標計算假設資料以「日」為主（Sharpe 年化係數 252）。
 """
 
@@ -50,17 +50,13 @@ class Backtester:
         self.tax_rate = float(tax_rate)
         self.slippage_per_unit = float(slippage_per_unit)
 
-        # 若策略未帶 broker，回測時自動建立 MockBroker。
-        broker = getattr(self.strategy, "broker", None)
-        if broker is None:
-            broker = MockBroker(
+        self.broker = MockBroker(
                 initial_cash=self.initial_cash,
                 commission_rate=self.commission_rate,
                 tax_rate=self.tax_rate,
                 slippage_per_unit=self.slippage_per_unit,
             )
-            setattr(self.strategy, "broker", broker)
-        self.broker: MockBroker = broker
+        self.strategy.set_broker(self.broker)
 
         self.commission_rate = float(getattr(self.broker, "commission_rate", self.commission_rate))
         self.tax_rate = float(getattr(self.broker, "tax_rate", self.tax_rate))
@@ -352,6 +348,7 @@ class Backtester:
         self._equity_curve = []
         self._equity_timestamps = []
         self._cash = self.initial_cash
+        self._equity = self.initial_cash
         self._last_price = 0.0
         self._open_pos = None
 

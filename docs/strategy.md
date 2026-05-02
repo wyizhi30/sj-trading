@@ -25,10 +25,10 @@ broker.py      ←┘（只呼叫 place_signal）
 ## BaseStrategy 介面
 
 ```python
-class BaseStrategy:
+class BaseStrategy(ABC):
     strategy_id: str          # 策略名稱（唯一識別碼）
     code: str                 # 交易標的代碼，例如 "2330"
-    broker: BaseBroker        # Broker 參考
+    broker: Optional[BaseBroker]        # Broker 參考
     is_running: bool          # 是否正在運行
 
     def on_kbar(self, kbar: KBar) -> Optional[Signal]: ...   # 必須實作
@@ -36,6 +36,7 @@ class BaseStrategy:
     def on_order_update(self, order: Order) -> None: ...     # 選擇性實作
     def start(self) -> None: ...
     def stop(self) -> None: ...
+    def set_broker(self, broker: BaseBroker) -> None: ...
     def get_current_position(self) -> int: ...  # 正數=持有張數，0=空手
 ```
 
@@ -55,7 +56,6 @@ class BaseStrategy:
 MACrossStrategy(
     strategy_id: str,           # 例如 "ma_cross_v1"
     code: str,                  # 例如 "2330"（不帶 .TW）
-    broker: BaseBroker,
     short_window: int = 5,
     long_window: int = 20,
     quantity: int = 1,          # 每次交易張數
@@ -69,17 +69,11 @@ MACrossStrategy(
 
 | 參數 | 規則 | 錯誤行為 |
 |------|------|---------|
-| `strategy_id` | 不能為空字串 | 拋出 `ValueError` |
-| `code` | 不能為空字串 | 拋出 `ValueError` |
 | `quantity` | 必須大於 0 | 拋出 `ValueError` |
 | `short_window` | 必須大於 0 | 拋出 `ValueError` |
 | `long_window` | 必須大於 0 | 拋出 `ValueError` |
 | `short_window` / `long_window` | `short_window < long_window` | 拋出 `ValueError` |
 | `order_type` | 只能是 `MARKET` 或 `LIMIT` | 拋出 `ValueError` |
-
-補充：
-- `order_type` 會在初始化時轉成大寫，確保後續邏輯一致。
-- 這些限制與 `strategy.py` 的 `__post_init__` 驗證一致。
 
 ---
 
@@ -151,86 +145,19 @@ if signal.action == "Sell" and self.get_current_position() == 0:
 
 ---
 
-## 自訂策略範例
-
-```python
-from strategy import BaseStrategy
-from schemas import KBar, Signal
-from typing import Optional
-
-class RSIStrategy(BaseStrategy):
-    """RSI 超買超賣策略"""
-
-    def __init__(self, strategy_id, code, broker, rsi_period=14):
-        super().__init__(strategy_id, code, broker)
-        self.rsi_period = rsi_period
-        self.prices = []
-
-    def on_kbar(self, kbar: KBar) -> Optional[Signal]:
-        self.prices.append(kbar.Close)   # 注意 KBar 欄位大寫
-
-        if len(self.prices) < self.rsi_period + 1:
-            return None
-
-        rsi = self._calc_rsi()
-
-        if rsi < 30 and self.get_current_position() == 0:
-            return Signal(
-                strategy_id=self.strategy_id,
-                code=self.code,       # 純數字，例如 "2330"
-                action="Buy",
-                order_type="MARKET",
-                price=None,
-                quantity=1,
-                timestamp=kbar.ts
-            )
-        elif rsi > 70 and self.get_current_position() > 0:
-            return Signal(
-                strategy_id=self.strategy_id,
-                code=self.code,
-                action="Sell",
-                order_type="MARKET",
-                price=None,
-                quantity=1,
-                timestamp=kbar.ts
-            )
-        return None
-```
-
----
 
 ## 範例程式碼：實盤啟動
 
 ```python
-import shioaji as sj
-from broker import Broker
-from strategy import MACrossStrategy
-from market_data import MarketData
-
-# 初始化 Shioaji
-api = sj.Shioaji(simulation=True)
-api.login(api_key="YOUR_KEY", secret_key="YOUR_SECRET", contracts_timeout=10000)
-
-# 建立 Broker
-broker = Broker(api)
-
-# 建立策略（code 用純數字）
 strategy = MACrossStrategy(
     strategy_id="ma_cross_v1",
-    code="2330",         # ✅ 不帶 .TW
-    broker=broker,
+    code="2330",
     short_window=5,
     long_window=20,
     quantity=1
 )
 
-# 訂閱 Broker 事件
-broker.on_order_update(strategy.on_order_update)
-
-# 建立 MarketData，訂閱 K 棒
-md = MarketData(api)
-md.subscribe_kbar("2330", strategy.on_kbar)
-
+strategy.set_broker(broker)
 strategy.start()
 ```
 
@@ -254,4 +181,4 @@ strategy.start()
 3. KBar 欄位名稱**首字大寫**：`Open`、`High`、`Low`、`Close`、`Volume`
 4. `on_kbar` 回傳 Signal 後，由外部（`main.py` 或 `Backtest`）呼叫 `broker.place_signal()`
 5. 收盤價序列只保留最近 `long_window × 2` 筆，避免記憶體無限增長
-6. 實盤與回測使用完全相同的 Strategy 程式碼，差別只在傳入的 `broker` 是 `Broker` 還是 `MockBroker`
+6. Broker 改用 set_broker() 注入

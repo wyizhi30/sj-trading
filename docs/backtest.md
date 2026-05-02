@@ -96,12 +96,10 @@ from broker import MockBroker
 from strategy import MACrossStrategy
 from backtest import Backtester
 
-# 建立 MockBroker 和策略
-mock_broker = MockBroker()
+# 建立 策略
 strategy = MACrossStrategy(
     strategy_id="ma_cross_v1",
     code="2330",    # 純數字，不帶 .TW
-    broker=mock_broker,
     short_window=5,
     long_window=20,
     quantity=1
